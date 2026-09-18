@@ -29,7 +29,7 @@ function checkRateLimit(ip) {
     return timestamps.length <= RATE_LIMIT_MAX_REQUESTS;
 }
 
-export default async function handler(req, res) {
+module.exports = async (req, res) => {
     // CORS: adjust origin as needed once you know your deployed domain.
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -75,6 +75,11 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: 'Requested model is not allowed.' });
     }
 
+    // Server-side timeout too, so this function can never hang up to the platform's
+    // own execution limit -- it always returns something to the client quickly.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
+
     try {
         const upstream = await fetch(
             `https://generativelanguage.googleapis.com/v1beta/models/${requestedModel}:generateContent`,
@@ -85,6 +90,7 @@ export default async function handler(req, res) {
                     'x-goog-api-key': apiKey, // stays server-side; never sent to the browser
                 },
                 body: bodyStr,
+                signal: controller.signal,
             }
         );
 
@@ -104,8 +110,14 @@ export default async function handler(req, res) {
 
         return res.status(200).json(data);
     } catch (err) {
+        if (err.name === 'AbortError') {
+            console.error('Gemini proxy: upstream request timed out.');
+            return res.status(504).json({ error: 'The AI service took too long to respond. Please try again.' });
+        }
         // Log only the error message, never headers/keys/request body.
         console.error('Gemini proxy network error:', err.message);
         return res.status(502).json({ error: 'Could not reach the AI service. Please try again shortly.' });
+    } finally {
+        clearTimeout(timeoutId);
     }
-}
+};
